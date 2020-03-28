@@ -414,6 +414,18 @@ public class Message extends FieldMap {
         return false;
     }
 
+    public boolean isAsyncAdminEligible() {
+        if (header.isSetField(MsgType.FIELD)) {
+            try {
+                final String msgType = header.getString(MsgType.FIELD);
+                return MessageUtils.isAsyncAdminEligible(msgType);
+            } catch (final FieldNotFound e) {
+                // shouldn't happen
+            }
+        }
+        return false;
+    }
+
     public boolean isApp() {
         return !isAdmin();
     }

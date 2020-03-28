@@ -12,6 +12,7 @@ import org.logicalcobwebs.proxool.ProxoolFacade;
 import org.logicalcobwebs.proxool.admin.SnapshotIF;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import quickfix.AsyncAdminHelper;
 import quickfix.Session;
 import quickfix.SystemTime;
 import quickfix.mina.ProtocolFactory;
@@ -42,6 +43,7 @@ public class AcceptanceTestSuite extends TestSuite {
 
     private final boolean skipSlowTests;
     private final boolean multithreaded;
+    private final boolean asyncApp;
 
     private final Map<Object, Object> overridenProperties;
 
@@ -151,13 +153,22 @@ public class AcceptanceTestSuite extends TestSuite {
         this(testDirectory, multithreaded, null);
     }
 
-    public AcceptanceTestSuite(String testDirectory, boolean multithreaded, Map<Object, Object> overridenProperties) {
+    public AcceptanceTestSuite(String testDirectory, boolean multithreaded,
+                               Map<Object, Object> overridenProperties) {
+        this(testDirectory, multithreaded, overridenProperties, false);
+    }
+    public AcceptanceTestSuite(String testDirectory, boolean multithreaded,
+                               Map<Object, Object> overridenProperties,
+                               boolean asyncApp) {
         this.multithreaded = multithreaded;
         this.overridenProperties = overridenProperties;
+        this.asyncApp = asyncApp;
         SystemTime.setTimeSource(null);
 
         String name = testDirectory.substring(testDirectory.lastIndexOf(File.separatorChar) + 1);
-        this.setName(name + (multithreaded ? "-threaded" : ""));
+        name = name + (multithreaded ? "-threaded" : "");
+        name = name + (asyncApp ? "-async" : "");
+        this.setName(name);
         Long timeout = Long.getLong(ATEST_TIMEOUT_KEY);
         if (timeout != null) {
             ExpectMessageStep.TIMEOUT_IN_MS = timeout;
@@ -179,6 +190,10 @@ public class AcceptanceTestSuite extends TestSuite {
 
     public boolean isMultithreaded() {
         return multithreaded;
+    }
+
+    public boolean isAsyncApp() {
+        return asyncApp;
     }
 
     protected void addTest(String name) {
@@ -218,8 +233,9 @@ public class AcceptanceTestSuite extends TestSuite {
     private static final class AcceptanceTestServerSetUp extends TestSetup {
         private final boolean threaded;
         private final Map<Object, Object> overridenProperties;
-//        private Thread serverThread;
         private final ExecutorService executor = Executors.newSingleThreadExecutor();
+
+        private final AsyncAdminHelper asyncAdminHelper;
 
         private ATServer server;
 
@@ -227,12 +243,17 @@ public class AcceptanceTestSuite extends TestSuite {
             super(suite);
             this.threaded = suite.isMultithreaded();
             this.overridenProperties = suite.getOverridenProperties();
+            this.asyncAdminHelper = suite.isAsyncApp() ? new AsyncAdminHelper() : null;
         }
 
         protected void setUp() throws Exception {
             super.setUp();
-            server = new ATServer((TestSuite) getTest(), threaded, transportType, port, overridenProperties);
+            server = new ATServer((TestSuite) getTest(), threaded, transportType, port,
+                    overridenProperties, this.asyncAdminHelper);
             server.setUsingMemoryStore(true);
+            if (asyncAdminHelper != null) {
+                asyncAdminHelper.start();
+            }
             executor.execute(server);
             server.waitForInitialization();
         }
@@ -240,6 +261,9 @@ public class AcceptanceTestSuite extends TestSuite {
         protected void tearDown() throws Exception {
             server.stop();
             executor.shutdownNow();
+            if (asyncAdminHelper != null) {
+                asyncAdminHelper.stop();
+            }
             server.waitForTearDown();
             super.tearDown();
         }
@@ -250,36 +274,43 @@ public class AcceptanceTestSuite extends TestSuite {
         port = AvailablePortFinder.getNextAvailable(port);
         TestSuite acceptanceTests = new TestSuite(AcceptanceTestSuite.class.getSimpleName());
         // default server
+        acceptanceTests.addTest(new AcceptanceTestServerSetUp(new AcceptanceTestSuite("server", false, null, true)));
         acceptanceTests.addTest(new AcceptanceTestServerSetUp(new AcceptanceTestSuite("server", false)));
         acceptanceTests.addTest(new AcceptanceTestServerSetUp(new AcceptanceTestSuite("server", true)));
 
         Map<Object, Object> resendRequestChunkSizeProperties = new HashMap<>();
         resendRequestChunkSizeProperties.put(Session.SETTING_RESEND_REQUEST_CHUNK_SIZE, "5");
+        acceptanceTests.addTest(new AcceptanceTestServerSetUp(new AcceptanceTestSuite("resendRequestChunkSize", false, resendRequestChunkSizeProperties, true)));
         acceptanceTests.addTest(new AcceptanceTestServerSetUp(new AcceptanceTestSuite("resendRequestChunkSize", true, resendRequestChunkSizeProperties)));
         acceptanceTests.addTest(new AcceptanceTestServerSetUp(new AcceptanceTestSuite("resendRequestChunkSize", false, resendRequestChunkSizeProperties)));
 
         Map<Object, Object> lastMsgSeqNumProcessedProperties = new HashMap<>();
         lastMsgSeqNumProcessedProperties.put(Session.SETTING_ENABLE_LAST_MSG_SEQ_NUM_PROCESSED, "Y");
+        acceptanceTests.addTest(new AcceptanceTestServerSetUp(new AcceptanceTestSuite("lastMsgSeqNumProcessed", false, lastMsgSeqNumProcessedProperties, true)));
         acceptanceTests.addTest(new AcceptanceTestServerSetUp(new AcceptanceTestSuite("lastMsgSeqNumProcessed", true, lastMsgSeqNumProcessedProperties)));
         acceptanceTests.addTest(new AcceptanceTestServerSetUp(new AcceptanceTestSuite("lastMsgSeqNumProcessed", false, lastMsgSeqNumProcessedProperties)));
 
         Map<Object, Object> nextExpectedMsgSeqNumProperties = new HashMap<>();
         nextExpectedMsgSeqNumProperties.put(Session.SETTING_ENABLE_NEXT_EXPECTED_MSG_SEQ_NUM, "Y");
+        acceptanceTests.addTest(new AcceptanceTestServerSetUp(new AcceptanceTestSuite("nextExpectedMsgSeqNum", false, nextExpectedMsgSeqNumProperties, true)));
         acceptanceTests.addTest(new AcceptanceTestServerSetUp(new AcceptanceTestSuite("nextExpectedMsgSeqNum", true, nextExpectedMsgSeqNumProperties)));
         acceptanceTests.addTest(new AcceptanceTestServerSetUp(new AcceptanceTestSuite("nextExpectedMsgSeqNum", false, nextExpectedMsgSeqNumProperties)));
 
         Map<Object, Object> timestampProperties = new HashMap<>();
         timestampProperties.put(Session.SETTING_TIMESTAMP_PRECISION, "NANOS");
+        acceptanceTests.addTest(new AcceptanceTestServerSetUp(new AcceptanceTestSuite("timestamps", false, timestampProperties, true)));
         acceptanceTests.addTest(new AcceptanceTestServerSetUp(new AcceptanceTestSuite("timestamps", true, timestampProperties)));
         acceptanceTests.addTest(new AcceptanceTestServerSetUp(new AcceptanceTestSuite("timestamps", false, timestampProperties)));
 
         Map<Object, Object> rejectGarbledMessagesProperties = new HashMap<>();
         rejectGarbledMessagesProperties.put(Session.SETTING_REJECT_GARBLED_MESSAGE, "Y");
+        acceptanceTests.addTest(new AcceptanceTestServerSetUp(new AcceptanceTestSuite("rejectGarbledMessages", false, rejectGarbledMessagesProperties, true)));
         acceptanceTests.addTest(new AcceptanceTestServerSetUp(new AcceptanceTestSuite("rejectGarbledMessages", true, rejectGarbledMessagesProperties)));
         acceptanceTests.addTest(new AcceptanceTestServerSetUp(new AcceptanceTestSuite("rejectGarbledMessages", false, rejectGarbledMessagesProperties)));
 
         Map<Object, Object> validateChecksumProperties = new HashMap<>();
         validateChecksumProperties.put(Session.SETTING_VALIDATE_CHECKSUM, "N");
+        acceptanceTests.addTest(new AcceptanceTestServerSetUp(new AcceptanceTestSuite("validateChecksum", false, validateChecksumProperties, true)));
         acceptanceTests.addTest(new AcceptanceTestServerSetUp(new AcceptanceTestSuite("validateChecksum", true, validateChecksumProperties)));
         acceptanceTests.addTest(new AcceptanceTestServerSetUp(new AcceptanceTestSuite("validateChecksum", false, validateChecksumProperties)));
 

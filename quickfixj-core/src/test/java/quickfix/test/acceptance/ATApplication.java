@@ -24,6 +24,8 @@ import java.io.IOException;
 import org.junit.Assert;
 
 import quickfix.Application;
+import quickfix.ApplicationAsyncAdmin;
+import quickfix.AsyncAdminHelper;
 import quickfix.DoNotSend;
 import quickfix.FieldNotFound;
 import quickfix.IncorrectDataFormat;
@@ -93,5 +95,18 @@ public class ATApplication implements Application {
             IncorrectDataFormat, IncorrectTagValue, UnsupportedMessageType {
         assertNoSessionLock(sessionID);
         inboundCracker.crack(message, sessionID);
+    }
+
+    public static class ATApplicationAsyncAdmin extends ATApplication implements ApplicationAsyncAdmin {
+        final private AsyncAdminHelper asyncAdminHelper;
+
+        public ATApplicationAsyncAdmin(AsyncAdminHelper asyncAdminHelper) {
+            this.asyncAdminHelper = asyncAdminHelper;
+        }
+
+        @Override
+        public void beforeAdminSend(Message adminMessage, SessionID sessionID) {
+            asyncAdminHelper.beforeAdminSend(adminMessage, sessionID);
+        }
     }
 }

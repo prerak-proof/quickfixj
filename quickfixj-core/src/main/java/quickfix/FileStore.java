@@ -33,6 +33,12 @@ import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.RandomAccessFile;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
 import java.util.Calendar;
 import java.util.Collection;
 import java.util.Date;
@@ -63,6 +69,7 @@ public class FileStore implements MessageStore, Closeable {
     private final String sessionFileName;
     private final boolean syncWrites;
     private final int maxCachedMsgs;
+    private final boolean backupBeforeDelete;
     private final String charsetEncoding = CharsetSupport.getCharset();
     private RandomAccessFile messageFileReader;
     private RandomAccessFile messageFileWriter;
@@ -71,10 +78,11 @@ public class FileStore implements MessageStore, Closeable {
     private RandomAccessFile senderSequenceNumberFile;
     private RandomAccessFile targetSequenceNumberFile;
 
-    FileStore(String path, SessionID sessionID, boolean syncWrites, int maxCachedMsgs)
+    FileStore(String path, SessionID sessionID, boolean syncWrites, int maxCachedMsgs, boolean backupBeforeDelete)
             throws IOException {
         this.syncWrites = syncWrites;
         this.maxCachedMsgs = maxCachedMsgs;
+        this.backupBeforeDelete = backupBeforeDelete;
 
         messageIndex = maxCachedMsgs > 0 ? new TreeMap<>() : null;
 
@@ -221,6 +229,9 @@ public class FileStore implements MessageStore, Closeable {
 
     public void closeAndDeleteFiles() throws IOException {
         close();
+        if (this.backupBeforeDelete) {
+            backupFiles(msgFileName, headerFileName, senderSeqNumFileName, targetSeqNumFileName, sessionFileName);
+        }
         deleteFile(headerFileName);
         deleteFile(msgFileName);
         deleteFile(senderSeqNumFileName);
@@ -233,6 +244,40 @@ public class FileStore implements MessageStore, Closeable {
         if (file.exists() && !file.delete()) {
             System.err.println("File delete failed: " + fileName);
         }
+    }
+
+    private void backupFiles(String bodyFilename, String... otherFiles) throws IOException {
+        File bodyFile = new File(bodyFilename);
+        if (!bodyFile.exists() || bodyFile.length() == 0) {
+            return;
+        }
+
+        // generate a backup dir name
+        String time = DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss")
+                .withZone(ZoneId.systemDefault())
+                .format(Instant.ofEpochMilli(SystemTime.currentTimeMillis()));
+        String backupDirname = String.format("backup-%s", time);
+
+        // create backup dir if necessary
+        File parent = new File(otherFiles[0]).getParentFile();
+        File backupDir = new File(parent.getAbsolutePath(), backupDirname);
+        if (!backupDir.exists()) {
+            if (!backupDir.mkdir()) {
+                System.err.println("Unable to create backup dir: " + backupDir.getAbsolutePath());
+            }
+        }
+
+        // move the files
+        Path backupDirPath = backupDir.toPath();
+        backupFile(backupDirPath, bodyFilename);
+        for (String src : otherFiles) {
+            backupFile(backupDirPath, src);
+        }
+    }
+
+    private void backupFile(Path backupDir, String src) throws IOException {
+        Path srcPath = Path.of(src);
+        Files.move(srcPath, backupDir.resolve(srcPath.getFileName()), StandardCopyOption.REPLACE_EXISTING);
     }
 
     /* (non-Javadoc)

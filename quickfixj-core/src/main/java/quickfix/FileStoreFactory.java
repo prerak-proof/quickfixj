@@ -48,6 +48,11 @@ public class FileStoreFactory implements MessageStoreFactory {
      */
     public static final String SETTING_FILE_STORE_MAX_CACHED_MSGS = "FileStoreMaxCachedMsgs";
 
+    /**
+     * Whether to backup files before deleting on reset
+     */
+    public static final String SETTING_FILE_STORE_BACKUP_BEFORE_DELETE = "BackupBeforeDelete";
+
     protected final SessionSettings settings;
 
     /**
@@ -77,7 +82,12 @@ public class FileStoreFactory implements MessageStoreFactory {
                     maxCachedMsgs = (int) maxCachedMsgsSetting;
                 }
             }
-            return new FileStore(settings.getString(sessionID, FileStoreFactory.SETTING_FILE_STORE_PATH), sessionID, syncWrites, maxCachedMsgs);
+            boolean backupBeforeDelete = false;
+            if (settings.isSetting(sessionID, SETTING_FILE_STORE_BACKUP_BEFORE_DELETE)) {
+                backupBeforeDelete = settings.getBool(sessionID, SETTING_FILE_STORE_BACKUP_BEFORE_DELETE);
+            }
+            return new FileStore(settings.getString(sessionID, FileStoreFactory.SETTING_FILE_STORE_PATH), sessionID,
+                    syncWrites, maxCachedMsgs, backupBeforeDelete);
         } catch (Exception e) {
             throw new RuntimeException(e);
         }

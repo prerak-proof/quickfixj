@@ -192,6 +192,10 @@ public class MessageUtils {
         return msgType.length() == 1 && "0A12345".contains(msgType);
     }
 
+    public static boolean isAsyncAdminEligible(String msgType) {
+        return msgType.length() == 1 && "0A12345j".contains(msgType);
+    }
+
     public static boolean isHeartbeat(String message) {
         return isMessageType(message, MsgType.HEARTBEAT);
     }

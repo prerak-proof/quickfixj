@@ -402,6 +402,14 @@
                     </systemPropertyVariables>
                 </configuration>
             </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <configuration>
+                    <source>11</source>
+                    <target>11</target>
+                </configuration>
+            </plugin>
         </plugins>
     </build>
 
@@ -435,6 +443,72 @@
             <properties>
                 <acceptance.tests />
             </properties>
+        </profile>
+        <profile>
+            <id>proof</id>
+            <activation>
+                <activeByDefault>false</activeByDefault>
+            </activation>
+            <properties>
+                <acceptance.tests />
+                <skipTests>true</skipTests>
+                <maven.javadoc.skip>true</maven.javadoc.skip>
+                <maven.source.skip>true</maven.source.skip>
+                <version.number>${git.branch}-${git.commit.id.abbrev}</version.number>
+            </properties>
+            <build>
+                <finalName>proof-${project.artifactId}-${project.version}-${version.number}</finalName>
+                <plugins>
+                    <plugin>
+                        <groupId>pl.project13.maven</groupId>
+                        <artifactId>git-commit-id-plugin</artifactId>
+                        <version>2.2.4</version>
+                        <executions>
+                            <execution>
+                                <goals>
+                                    <goal>revision</goal>
+                                </goals>
+                                <phase>validate</phase>
+                            </execution>
+                        </executions>
+                        <configuration>
+                            <dotGitDirectory>${project.basedir}/../.git</dotGitDirectory>
+                            <dateFormat>yyyy-MM-dd'T'HHmmss</dateFormat>
+                            <generateGitPropertiesFile>true</generateGitPropertiesFile>
+                            <generateGitPropertiesFilename>${project.build.outputDirectory}/git.properties</generateGitPropertiesFilename>
+                        </configuration>
+                    </plugin>
+                    <plugin>
+                        <groupId>org.apache.felix</groupId>
+                        <artifactId>maven-bundle-plugin</artifactId>
+                        <configuration>
+                            <instructions>
+                                <Export-Package>
+                                    quickfix,quickfix.field.*,quickfix.mina.*,org.quickfixj.*
+                                    <!-- proof additions -->
+                                    ,org.apache.mina.*
+                                    ,quickfix.fix42.*,quickfix.fix43.*,quickfix.fix44.*
+                                </Export-Package>
+                                <Import-Package>
+                                    <!-- add dynamically-loaded version-specific message factories (optional)-->
+                                    quickfix.fix40;resolution:=optional,
+                                    quickfix.fix41;resolution:=optional,
+                                    quickfix.fix42;resolution:=optional,
+                                    quickfix.fix43;resolution:=optional,
+                                    quickfix.fix44;resolution:=optional,
+                                    quickfix.fix50;resolution:=optional,
+                                    quickfix.fix50sp1;resolution:=optional,
+                                    quickfix.fix50sp2;resolution:=optional,
+                                    quickfix.fixt11;resolution:=optional,
+                                    <!-- add the required imports -->
+                                    quickfix,quickfix.field,*
+                                </Import-Package>
+                                <Private-Package />
+                            </instructions>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
         </profile>
     </profiles>
 </project>

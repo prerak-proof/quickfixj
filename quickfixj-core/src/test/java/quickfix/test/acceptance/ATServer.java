@@ -24,6 +24,7 @@ import org.apache.mina.core.filterchain.IoFilterChainBuilder;
 import org.junit.Assert;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import quickfix.AsyncAdminHelper;
 import quickfix.DefaultMessageFactory;
 import quickfix.FileStoreFactory;
 import quickfix.FixVersions;
@@ -71,6 +72,7 @@ public class ATServer implements Runnable {
     private String keyStoreName;
     private String keyStorePassword;
     private Map<Object, Object> overridenProperties = null;
+    private AsyncAdminHelper asyncAdminHelper = null;
 
     public ATServer() {
         // defaults
@@ -82,14 +84,17 @@ public class ATServer implements Runnable {
     }
 
     public ATServer(TestSuite suite, boolean threaded, int transportType, int port) {
-        this(suite, threaded, transportType, port, null);
+        this(suite, threaded, transportType, port, null, null);
     }
 
-    public ATServer(TestSuite suite, boolean threaded, int transportType, int port, Map<Object, Object> overridenProperties) {
+    public ATServer(TestSuite suite, boolean threaded, int transportType, int port,
+                    Map<Object, Object> overridenProperties,
+                    AsyncAdminHelper asyncAdminHelper) {
         this.threaded = threaded;
         this.overridenProperties = overridenProperties;
         this.transportType = transportType;
         this.port = port;
+        this.asyncAdminHelper = asyncAdminHelper;
         Enumeration<junit.framework.Test> e = suite.tests();
         while (e.hasMoreElements()) {
             fixVersions.add(e.nextElement().toString().substring(0, 5));
@@ -158,7 +163,12 @@ public class ATServer implements Runnable {
                 acceptFixVersion(FixVersions.BEGINSTRING_FIXT11);
             }
 
-            ATApplication application = new ATApplication();
+            ATApplication application;
+            if (asyncAdminHelper == null) {
+                application = new ATApplication();
+            } else {
+                application = new ATApplication.ATApplicationAsyncAdmin(asyncAdminHelper);
+            }
             MessageStoreFactory factory = usingMemoryStore
                     ? new MemoryStoreFactory()
                     : new FileStoreFactory(settings);

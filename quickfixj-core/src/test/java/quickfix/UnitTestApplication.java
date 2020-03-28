@@ -25,7 +25,9 @@ import org.slf4j.LoggerFactory;
 import java.util.ArrayList;
 import java.util.List;
 
-public class UnitTestApplication implements ApplicationExtended, SessionStateListener {
+public class UnitTestApplication implements ApplicationExtended, SessionStateListener
+//        , ApplicationAsyncAdmin
+{
     private final Logger log = LoggerFactory.getLogger(UnitTestApplication.class);
 
     public final List<Message> fromAppMessages = new ArrayList<>();
@@ -138,4 +140,8 @@ public class UnitTestApplication implements ApplicationExtended, SessionStateLis
     public void onHeartBeatTimeout() {
     }
 
+    private final static AsyncAdminHelper asyncAdminHelper = new AsyncAdminHelper();
+    public void beforeAdminSend(Message adminMessage, SessionID sessionID) {
+        asyncAdminHelper.beforeAdminSend(adminMessage, sessionID);
+    }
 }

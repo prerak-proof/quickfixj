@@ -88,6 +88,7 @@ import static quickfix.LogUtil.logThrowable;
  * the sequence number).
  */
 public class Session implements Closeable {
+    private static final String DISCONNECT_MARKER = ", disconnecting";
 
     /**
      * Session setting for heartbeat interval (in seconds).
@@ -683,7 +684,11 @@ public class Session implements Closeable {
             throw new SessionNotFound();
         }
         message.setSessionID(sessionID);
-        return session.send(message);
+        if (message.isAsyncAdminEligible()) {
+            return session.sendAdmin(message, 0, false);
+        } else {
+            return session.send(message);
+        }
     }
 
     static void registerSession(Session session) {
@@ -863,8 +868,7 @@ public class Session implements Closeable {
                 if (application instanceof ApplicationExtended) {
                     ((ApplicationExtended) application).onBeforeSessionReset(sessionID);
                 }
-                generateLogout();
-                disconnect("Session reset", false);
+                generateLogoutAndDisconnect("Session reset", false);
             }
             resetState();
         } finally {
@@ -950,8 +954,7 @@ public class Session implements Closeable {
 
         // QFJ-650
         if (!header.isSetField(MsgSeqNum.FIELD)) {
-            generateLogout("Received message without MsgSeqNum");
-            disconnect("Received message without MsgSeqNum: " + getMessageToLog(message), true);
+            generateLogoutAndDisconnect(message, "Received message without MsgSeqNum", true);
             return;
         }
 
@@ -1095,18 +1098,17 @@ public class Session implements Closeable {
         } catch (final RejectLogon e) {
             final String rejectMessage = e.getMessage() != null ? (": " + e) : "";
             getLog().onErrorEvent("Logon rejected" + rejectMessage);
+            final String disconnectMessage = "Logon rejected: " + e;
+            SessionStatus ss = e.getSessionStatus() > -1 ? new SessionStatus(e.getSessionStatus()) : null;
             if (e.isLogoutBeforeDisconnect()) {
-                if (e.getSessionStatus() > -1) {
-                    generateLogout(e.getMessage(), new SessionStatus(e.getSessionStatus()));
-                } else {
-                    generateLogout(e.getMessage());
+                generateLogoutAndDisconnect(message, e.getMessage(), disconnectMessage,  ss, true);
+            } else {
+                // Only increment seqnum if we are at the expected seqnum
+                if (getExpectedTargetNum() == header.getInt(MsgSeqNum.FIELD)) {
+                    state.incrNextTargetMsgSeqNum();
                 }
+                disconnect(disconnectMessage, true);
             }
-            // Only increment seqnum if we are at the expected seqnum
-            if (getExpectedTargetNum() == header.getInt(MsgSeqNum.FIELD)) {
-                state.incrNextTargetMsgSeqNum();
-            }
-            disconnect("Logon rejected: " + e, true);
         } catch (final UnsupportedMessageType e) {
             if (logErrorAndDisconnectIfRequired(e, message)) {
                 return;
@@ -1120,16 +1122,8 @@ public class Session implements Closeable {
             if (logErrorAndDisconnectIfRequired(e, message)) {
                 return;
             }
-            if (MsgType.LOGOUT.equals(msgType)) {
-                nextLogout(message);
-            } else {
-                generateLogout("Incorrect BeginString: " + e.getMessage());
-                state.incrNextTargetMsgSeqNum();
-                // 1d_InvalidLogonWrongBeginString.def appears to require
-                // a disconnect although the C++ didn't appear to be doing it.
-                // ???
-                disconnect("Incorrect BeginString: " + e, true);
-            }
+            generateLogoutAndDisconnect(message, "Incorrect BeginString: " + e.getMessage(),
+                                "Incorrect BeginString: " + e, null, true);
         } catch (final IOException e) {
             LogUtil.logThrowable(sessionID, "Error processing message: " + getMessageToLog(message), e);
             if (resetOrDisconnectIfRequired(message)) {
@@ -1174,18 +1168,16 @@ public class Session implements Closeable {
 
     private void handleExceptionAndRejectMessage(final String msgType, final Message message, final HasFieldAndReason e) throws FieldNotFound, IOException {
         if (MsgType.LOGON.equals(msgType)) {
-            logoutWithErrorMessage(e.getMessage());
+            logoutWithErrorMessage(e.getMessage(), message);
         } else {
             getLog().onErrorEvent("Rejecting invalid message: " + e + ": " + getMessageToLog(message));
             generateReject(message, e.getMessage(), e.getSessionRejectReason(), e.getField());
         }
     }
 
-    private void logoutWithErrorMessage(final String reason) throws IOException {
+    private void logoutWithErrorMessage(final String reason, final Message incoming) throws IOException {
         final String errorMessage = "Invalid Logon message: " + (reason != null ? reason : "unspecific reason");
-        generateLogout(errorMessage);
-        state.incrNextTargetMsgSeqNum();
-        disconnect(errorMessage, true);
+        generateLogoutAndDisconnect(incoming, errorMessage, true);
     }
 
     private boolean logErrorAndDisconnectIfRequired(final Exception e, Message message) {
@@ -1206,6 +1198,8 @@ public class Session implements Closeable {
             generateReject(message, "Message failed basic validity check");
             return;
         }
+        // process any queued messages first
+        nextQueued();
         next(message, false);
     }
 
@@ -1358,7 +1352,7 @@ public class Session implements Closeable {
                 getLog().onErrorEvent("Received message without MsgSeqNum " + getMessageToLog(receivedMessage));
             }
         }
-        sendRaw(sequenceReset, beginSeqNo);
+        sendAdmin(sequenceReset, beginSeqNo, false);
         getLog().onEvent("Sent SequenceReset TO: " + endSeqNo);
     }
 
@@ -1401,46 +1395,99 @@ public class Session implements Closeable {
             if (logout.isSetField(Text.FIELD)) {
                 msg += ": " + logout.getString(Text.FIELD);
             }
-            getLog().onEvent(msg);
-            generateLogout(logout);
-            getLog().onEvent("Sent logout response");
+
+            generateLogoutAndDisconnect(logout, null, msg, null, false);
+
+            if (resetOnLogout) {
+                resetState();
+            }
         } else {
             msg = "Received logout response";
             getLog().onEvent(msg);
+
+            // QFJ-750
+            if (getExpectedTargetNum() == logout.getHeader().getInt(MsgSeqNum.FIELD)) {
+                state.incrNextTargetMsgSeqNum();
+            }
+
+            disconnect(msg, false);
+
+            if (resetOnLogout) {
+                resetState();
+            }
+        }
+    }
+
+    private void generateLogoutAndDisconnect(String text, boolean isError) throws IOException {
+        generateLogoutAndDisconnect(null, text, isError);
+    }
+    private void generateLogoutAndDisconnect(Message incoming, String text, boolean isError) throws IOException {
+        generateLogoutAndDisconnect(incoming, text, text, null, isError);
+    }
+    private void generateLogoutAndDisconnect(Message incoming, String logoutText, String disconnectText,
+                                             SessionStatus sessionStatus, boolean isError) throws IOException {
+        // if this is an unsolicited logout and we're doing async admin, add a marker suggesting disconnection
+        if (!state.isLogoutReceived() && isAsyncAdmin()) {
+            logoutText = addDisconnectionMarker(logoutText);
+        }
+        // generate logout
+        generateLogout(incoming, logoutText, sessionStatus);
+
+        // increment incoming seq number as necessary
+        if (incoming != null) {
+            if (incoming.getHeader().isSetField(MsgSeqNum.FIELD)) {
+                try {
+                    int msgSeqNum = incoming.getHeader().getInt(MsgSeqNum.FIELD);
+                    if (msgSeqNum == state.getNextTargetMsgSeqNum()) {
+                        state.incrNextTargetMsgSeqNum();
+                    }
+                } catch (FieldNotFound fieldNotFound) {
+                    // ignored - not likely since we checked already
+                }
+            }
         }
 
-        // QFJ-750
-        if (getExpectedTargetNum() == logout.getHeader().getInt(MsgSeqNum.FIELD)) {
-            state.incrNextTargetMsgSeqNum();
-        }
-        if (resetOnLogout) {
-            resetState();
+        // prepare log message - add incoming/causal message to log if possible
+        if (disconnectText != null && incoming != null) {
+            disconnectText = disconnectText + "; message=" + getMessageToLog(incoming);
         }
 
-        disconnect(msg, false);
+        if (!isAsyncAdmin()) {
+            state.setLogoutSent(true);
+            finishLogoutAndDisconnect(disconnectText, isError);
+        } else {
+            logDisconnect(disconnectText, isError, false);
+        }
+    }
+
+    private String addDisconnectionMarker(String logoutText) {
+        if (logoutText != null) {
+            logoutText = logoutText + DISCONNECT_MARKER;
+        } else {
+            logoutText = DISCONNECT_MARKER;
+        }
+        return logoutText;
+    }
+
+    private void finishLogoutAndDisconnect(String disconnectText, boolean isError) throws IOException {
+        // note that the following call not only disconnects (if connected), but also resets state variables
+        disconnect(disconnectText, isError);
     }
 
     public void generateLogout() {
         generateLogout(null, null, null);
     }
 
-    private void generateLogout(Message otherLogout) {
-        generateLogout(otherLogout, null, null);
-    }
-
     private void generateLogout(String reason) {
         generateLogout(null, reason, null);
-    }
-
-    private void generateLogout(String reason, SessionStatus sessionStatus) {
-        generateLogout(null, reason, sessionStatus);
     }
 
     /**
      * To generate a logout message
      *
      * @param otherLogout if not null, the logout message that is causing a logout to be sent
-     * @param text
+     * @param text text to send back in response logout
+     * @param sessionStatus if non-null, session status that should be sent back on logout
      */
     private void generateLogout(Message otherLogout, String text, SessionStatus sessionStatus) {
         final Message logout = messageFactory.create(sessionID.getBeginString(), MsgType.LOGOUT);
@@ -1460,8 +1507,7 @@ public class Session implements Closeable {
                 getLog().onErrorEvent("Received logout without MsgSeqNum");
             }
         }
-        sendRaw(logout, 0);
-        state.setLogoutSent(true);
+        sendAdmin(logout, 0, false);
     }
 
     private void nextSequenceReset(Message sequenceReset) throws IOException, RejectLogon,
@@ -1539,7 +1585,7 @@ public class Session implements Closeable {
         }
 
         reject.setString(Text.FIELD, str);
-        sendRaw(reject, 0);
+        sendAdmin(reject, 0, false);
         getLog().onErrorEvent("Reject sent for message " + msgSeqNum + ": " + str);
     }
 
@@ -1636,7 +1682,7 @@ public class Session implements Closeable {
                     message.getHeader().getInt(MsgSeqNum.FIELD));
         }
 
-        sendRaw(reject, 0);
+        sendAdmin(reject, 0, false);
     }
 
     private void setRejectReason(Message reject, String reason) {
@@ -1664,8 +1710,7 @@ public class Session implements Closeable {
         }
     }
 
-    private void generateBusinessReject(Message message, int err, int field) throws FieldNotFound,
-            IOException {
+    private void generateBusinessReject(Message message, int err, int field) throws FieldNotFound, IOException {
         final Message reject = messageFactory.create(sessionID.getBeginString(),
                 MsgType.BUSINESS_MESSAGE_REJECT);
         final Header header = message.getHeader();
@@ -1685,7 +1730,7 @@ public class Session implements Closeable {
                 "Reject sent for message " + msgSeqNum + (reason != null ? (": " + reason) : "")
                         + (field != 0 ? (": tag=" + field) : ""));
 
-        sendRaw(reject, 0);
+        sendAdmin(reject, 0, false);
     }
 
     private void nextTestRequest(Message testRequest) throws FieldNotFound, RejectLogon,
@@ -1711,7 +1756,7 @@ public class Session implements Closeable {
                     testRequest.getHeader().getInt(MsgSeqNum.FIELD));
         }
 
-        sendRaw(heartbeat, 0);
+        sendAdmin(heartbeat, 0, false);
     }
 
     private void nextHeartBeat(Message heartBeat) throws FieldNotFound, RejectLogon,
@@ -1802,8 +1847,8 @@ public class Session implements Closeable {
             final int msgSeqNum = msg.getHeader().getInt(MsgSeqNum.FIELD);
             final String text = "MsgSeqNum too low, expecting " + getExpectedTargetNum()
                     + " but received " + msgSeqNum;
-            generateLogout(text);
-            throw new SessionException(text);
+            generateLogoutAndDisconnect(text, true);
+            return false;
         }
         return validatePossDup(msg);
     }
@@ -1813,7 +1858,7 @@ public class Session implements Closeable {
             generateReject(msg, BAD_COMPID_REJ_REASON, 0);
             generateLogout(BAD_COMPID_TEXT);
         } else {
-            logoutWithErrorMessage(BAD_COMPID_TEXT);
+            logoutWithErrorMessage(BAD_COMPID_TEXT, msg);
         }
     }
 
@@ -1823,7 +1868,7 @@ public class Session implements Closeable {
                 generateReject(msg, BAD_TIME_REJ_REASON, SendingTime.FIELD);
                 generateLogout(BAD_TIME_TEXT);
             } else {
-                logoutWithErrorMessage(BAD_TIME_TEXT);
+                logoutWithErrorMessage(BAD_TIME_TEXT, msg);
             }
         } catch (final SessionException ex) {
             generateLogout(ex.getMessage());
@@ -1880,6 +1925,7 @@ public class Session implements Closeable {
                 if (!state.isLogoutSent()) {
                     getLog().onEvent("Initiated logout request");
                     generateLogout(state.getLogoutReason());
+                    return;
                 }
             } else {
                 return;
@@ -1923,7 +1969,7 @@ public class Session implements Closeable {
                     if (generateLogon()) {
                         getLog().onEvent("Initiated logon request");
                     } else {
-                        getLog().onErrorEvent("Error during logon request initiation");
+                        getLog().onEvent("Logon request generated and deferred to application");
                     }
                 }
             } else if (state.isLogonAlreadySent() && state.isLogonTimedOut()) {
@@ -1938,6 +1984,7 @@ public class Session implements Closeable {
 
         if (state.isLogoutTimedOut()) {
             disconnect("Timed out waiting for logout response", true);
+            return;
         }
 
         if (state.isTimedOut()) {
@@ -1980,7 +2027,7 @@ public class Session implements Closeable {
         final Message heartbeat = messageFactory.create(sessionID.getBeginString(),
                 MsgType.HEARTBEAT);
         initializeHeader(heartbeat.getHeader());
-        sendRaw(heartbeat, 0);
+        sendAdmin(heartbeat, 0, false);
     }
 
     public void generateTestRequest(String id) {
@@ -1989,7 +2036,7 @@ public class Session implements Closeable {
                 MsgType.TEST_REQUEST);
         initializeHeader(testRequest.getHeader());
         testRequest.setString(TestReqID.FIELD, id);
-        sendRaw(testRequest, 0);
+        sendAdmin(testRequest, 0, false);
     }
 
     private boolean generateLogon() throws IOException {
@@ -2012,7 +2059,6 @@ public class Session implements Closeable {
         }
         state.setLastReceivedTime(SystemTime.currentTimeMillis());
         state.clearTestRequestCounter();
-        state.setLogonSent(true);
         logonAttempts++;
 
         if (enableNextExpectedMsgSeqNum) {
@@ -2020,7 +2066,7 @@ public class Session implements Closeable {
             logon.setInt(NextExpectedMsgSeqNum.FIELD, nextExpectedMsgNum);
             state.setLastExpectedLogonNextSeqNum(nextExpectedMsgNum);
         }
-        return sendRaw(logon, 0);
+        return sendAdmin(logon, 0, false);
     }
 
     /**
@@ -2047,12 +2093,7 @@ public class Session implements Closeable {
                     }
                     return;
                 }
-                final String msg = "Disconnecting: " + reason;
-                if (logError) {
-                    getLog().onErrorEvent(msg);
-                } else {
-                    getLog().onEvent(msg);
-                }
+                logDisconnect(reason, logError, true);
                 responder.disconnect();
                 setResponder(null);
             }
@@ -2088,6 +2129,16 @@ public class Session implements Closeable {
         }
     }
 
+    private void logDisconnect(String reason, boolean logError, boolean disconnectImminent) {
+        final String action = disconnectImminent ? "Disconnecting" : "Will disconnect";
+        final String msg = action + (reason != null ? ": " + reason : "");
+        if (logError) {
+            getLog().onErrorEvent(msg);
+        } else {
+            getLog().onEvent(msg);
+        }
+    }
+
     private void nextLogon(Message logon) throws FieldNotFound, RejectLogon, IncorrectDataFormat,
             IncorrectTagValue, UnsupportedMessageType, IOException, InvalidMessage {
 
@@ -2110,9 +2161,10 @@ public class Session implements Closeable {
         if (logon.isSetField(ResetSeqNumFlag.FIELD)) {
             state.setResetReceived(logon.getBoolean(ResetSeqNumFlag.FIELD));
         } else if (state.isResetSent() && logon.getHeader().getInt(MsgSeqNum.FIELD) == 1) { // QFJ-383
-            getLog().onEvent(
-                    "Inferring ResetSeqNumFlag as sequence number is 1 in response to reset request");
+            getLog().onEvent("Inferring ResetSeqNumFlag as sequence number is 1 in response to reset request");
             state.setResetReceived(true);
+        } else {
+            state.setResetReceived(false);
         }
 
         if (state.isResetReceived()) {
@@ -2166,12 +2218,19 @@ public class Session implements Closeable {
                 final String err = "Tag " + NextExpectedMsgSeqNum.FIELD
                         + " (NextExpectedMsgSeqNum) is higher than expected. Expected "
                         + actualNextNum + ", Received " + targetWantsNextSeqNumToBe;
-                generateLogout(err);
-                disconnect(err, true);
+                generateLogoutAndDisconnect(logon, err, true);
                 return;
             }
         }
+
+        // Check for proper sequence reset response
+        if (state.isResetSent() && !state.isResetReceived()) {
+            disconnect("Received logon response before sending request", true);
+        }
+
+        // Looks like a good logon was received
         getLog().onEvent("Received logon");
+
         if (!state.isInitiator()) {
             /*
              * If we got one too high they need messages resent use the first message they missed (as we gap fill with that).
@@ -2185,11 +2244,6 @@ public class Session implements Closeable {
                 nextExpectedTargetNum++;
             }
             generateLogon(logon, nextExpectedTargetNum);
-        }
-
-        // Check for proper sequence reset response
-        if (state.isResetSent() && !state.isResetReceived()) {
-            disconnect("Received logon response before sending request", true);
         }
 
         state.setResetSent(false);
@@ -2209,12 +2263,41 @@ public class Session implements Closeable {
             }
         } else {
             state.incrNextTargetMsgSeqNum();
-            nextQueued();
         }
 
-        // Do we have a 789
-        if (logon.isSetField(NextExpectedMsgSeqNum.FIELD) && enableNextExpectedMsgSeqNum) {
+        ResendRange implicitRR = null;
+        if (enableNextExpectedMsgSeqNum && logon.isSetField(NextExpectedMsgSeqNum.FIELD)) {
             final int targetWantsNextSeqNumToBe = logon.getInt(NextExpectedMsgSeqNum.FIELD);
+            if (targetWantsNextSeqNumToBe != nextSenderMsgNumAtLogonReceived) {
+                implicitRR = new ResendRange(targetWantsNextSeqNumToBe, nextSenderMsgNumAtLogonReceived);
+            }
+        }
+        state.setImplicitResendRequestFromLogon(implicitRR);
+
+        if (state.isInitiator() || !isAsyncAdmin()) {
+            finishLogon(logon);
+        }
+    }
+
+    /**
+     * For acceptors, the logon action is broken up into 3 steps:
+     * 1) receive logon, validate it, record it
+     * 2) send logon in response
+     * 3) finish logon process by replaying any messages needed as a result of 789, and invoking necessary callbacks
+     *
+     * @param logon if available, this is the received logon message (may be null)
+     */
+    private void finishLogon(Message logon) throws FieldNotFound, IOException, InvalidMessage {
+        // in order to do below steps, we should have received a logon and sent a logon, regardless of order.
+        if (!isLoggedOn()) {
+            return;
+        }
+
+        // Do we have a 789-based resend request
+        ResendRange rr = state.getImplicitResendRequestFromLogon();
+        if (enableNextExpectedMsgSeqNum && rr != null) {
+            int targetWantsNextSeqNumToBe = rr.getBeginSeqNo();
+            int nextSenderMsgNumAtLogonReceived = rr.getEndSeqNo();
 
             // is the 789 lower (we checked for higher previously) than our next message after receiving the logon
             if (targetWantsNextSeqNumToBe != nextSenderMsgNumAtLogonReceived) {
@@ -2243,16 +2326,16 @@ public class Session implements Closeable {
                 }
             }
         }
-        if (isLoggedOn()) {
-            try {
-                application.onLogon(sessionID);
-            } catch (final Throwable t) {
-                logApplicationException("onLogon()", t);
-            }
-            stateListener.onLogon();
-            lastSessionLogon = SystemTime.currentTimeMillis();
-            logonAttempts = 0;
+
+        // if everything is done and we're fully logged on, let the app know...
+        try {
+            application.onLogon(sessionID);
+        } catch (final Throwable t) {
+            logApplicationException("onLogon()", t);
         }
+        stateListener.onLogon();
+        lastSessionLogon = SystemTime.currentTimeMillis();
+        logonAttempts = 0;
     }
 
     private void resendMessages(Message receivedMessage, int beginSeqNo, int endSeqNo)
@@ -2467,7 +2550,7 @@ public class Session implements Closeable {
         resendRequest.setInt(BeginSeqNo.FIELD, beginSeqNo);
         resendRequest.setInt(EndSeqNo.FIELD, endSeqNo);
         initializeHeader(resendRequest.getHeader());
-        sendRaw(resendRequest, 0);
+        sendAdmin(resendRequest, 0, false);
         getLog().onEvent("Sent ResendRequest FROM: " + beginSeqNo + " TO: " + (endSeqNo == 0 ? "infinity" : endSeqNo));
         state.setResendRange(beginSeqNo, msgSeqNum - 1, resendRequestChunkSize == 0
                 ? 0
@@ -2534,8 +2617,65 @@ public class Session implements Closeable {
         } else {
             getLog().onEvent("Responding to Logon request");
         }
-        sendRaw(logon, 0);
-        state.setLogonSent(true);
+        sendAdmin(logon, 0, false);
+    }
+
+    public void sendDeferredAdmin(Message message) throws FieldNotFound, IOException, InvalidMessage {
+        // can the below if be false ever? as of now, nothing calls this other than an async app
+        if (isAsyncAdmin()) {
+            switch (message.getHeader().getString(MsgType.FIELD)) {
+                case MsgType.LOGON:
+                    sendAdmin(message, 0, true);
+                    finishLogon(null);
+                    return;
+                case MsgType.LOGOUT:
+                    boolean doDisconnect = removeDisconnectMarker(message);
+                    sendAdmin(message, 0, true);
+                    if (state.isLogoutReceived() || doDisconnect) {
+                        finishLogoutAndDisconnect(null, false);
+                    }
+                    return;
+            }
+        }
+        sendAdmin(message, 0, true);
+    }
+
+    // returns true if disconnect marker was found and removed
+    private boolean removeDisconnectMarker(Message message) throws FieldNotFound {
+        if (message.isSetField(Text.FIELD)) {
+            String text = message.getString(Text.FIELD);
+            if (text.endsWith(DISCONNECT_MARKER)) {
+                if (text.length() > DISCONNECT_MARKER.length()) {
+                    text = text.substring(0, text.length() - DISCONNECT_MARKER.length());
+                    message.setString(Text.FIELD, text);
+                } else {
+                    message.removeField(Text.FIELD);
+                }
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * @return true, if message was sent using sendRaw; false, if it was deferred to the application
+     */
+    private boolean sendAdmin(Message message, int num, boolean forceSend) {
+        // allow the application to handle the admin message being sent if:
+        // 1) it will burn a sequence number
+        // 2) we have an app that cares about this
+        // 3) this is an admin message
+        if (!forceSend && num == 0 && isAsyncAdmin() && message.isAsyncAdminEligible()) {
+            ((ApplicationAsyncAdmin) application).beforeAdminSend(message, sessionID);
+            return false;
+        }
+        // continue sending the message; we don't use sendRaw return value as sendAdmin return value has meaning
+        sendRaw(message, num);
+        return true;
+    }
+
+    private boolean isAsyncAdmin() {
+        return application instanceof ApplicationAsyncAdmin;
     }
 
     private void persist(Header header, String messageString, int num) throws IOException, FieldNotFound {
@@ -2586,26 +2726,36 @@ public class Session implements Closeable {
                     logApplicationException("toAdmin()", t);
                 }
 
-                if (MsgType.LOGON.equals(msgType)) {
-                    if (!state.isResetReceived()) {
-                        boolean resetSeqNumFlag = false;
-                        if (message.isSetField(ResetSeqNumFlag.FIELD)) {
-                            resetSeqNumFlag = message.getBoolean(ResetSeqNumFlag.FIELD);
-                        }
-                        if (resetSeqNumFlag) {
-                            resetState();
-                            message.getHeader().setInt(MsgSeqNum.FIELD, getExpectedSenderNum());
-                        }
-                        state.setResetSent(resetSeqNumFlag);
-                    }
-                }
-
                 messageString = message.toString();
                 persist(message.getHeader(), messageString, num);
                 if (MsgType.LOGON.equals(msgType) || MsgType.LOGOUT.equals(msgType)
                         || MsgType.RESEND_REQUEST.equals(msgType)
                         || MsgType.SEQUENCE_RESET.equals(msgType) || isLoggedOn()) {
+
                     result = send(messageString);
+
+                    if (MsgType.LOGON.equals(msgType)) {
+                        if (result) {
+                            getLog().onEvent("Logon sent");
+                            state.setLogonSent(true);
+                            if (!state.isResetReceived()) {
+                                boolean resetSeqNumFlag = false;
+                                if (message.isSetField(ResetSeqNumFlag.FIELD)) {
+                                    resetSeqNumFlag = message.getBoolean(ResetSeqNumFlag.FIELD);
+                                }
+                                state.setResetSent(resetSeqNumFlag);
+                            }
+                        } else {
+                            getLog().onEvent("Logon could not be sent");
+                        }
+                    } else if (MsgType.LOGOUT.equals(msgType)) {
+                        if (result) {
+                            getLog().onEvent("Logout sent");
+                            state.setLogoutSent(true);
+                        } else {
+                            getLog().onEvent("Logout could not be sent");
+                        }
+                    }
                 }
             } else {
                 try {

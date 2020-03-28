@@ -25,6 +25,7 @@ import java.util.Date;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
 
@@ -64,12 +65,17 @@ public final class SessionState {
     private String logoutReason;
 
     /*
-     * If this is anything other than zero it's the value of the 789/NextExpectedMsgSeqNum tag in the last Logon message sent.
+     * If this is anything other than zero it's the value of the 789/NextExpectedMsgSeqNum tag in the last Logon message sent by us.
      * It is used to determine if the recipient has enough information (assuming they support 789) to avoid the need
      * for a resend request i.e. they should be resending any necessary missing messages already. This value is used
      * to populate the resendRange if necessary.
      */
     private final AtomicInteger nextExpectedMsgSeqNum = new AtomicInteger(0);
+
+    /*
+     * This stores the implicit reset range received based on 789/NextExpectedMsgSeqNum in an incoming logon
+     */
+    private final AtomicReference<ResendRange> implicitResendRequestFromLogon = new AtomicReference<>();
 
     // The messageQueue should be accessed from a single thread
     private final Map<Integer, Message> messageQueue = new LinkedHashMap<>();
@@ -379,6 +385,8 @@ public final class SessionState {
 
     public void reset() {
         try {
+            nextExpectedMsgSeqNum.set(0);
+            implicitResendRequestFromLogon.set(null);
             messageStore.reset();
         } catch (IOException e) {
             throw new RuntimeError(e);
@@ -480,6 +488,16 @@ public final class SessionState {
         return this.nextExpectedMsgSeqNum.get() != 0;
     }
 
+    /**
+     * @param rr Implicit resend request received through 789/NextExpectedMsgSeqNum on an incoming logon
+     */
+    public void setImplicitResendRequestFromLogon(ResendRange rr) {
+        this.implicitResendRequestFromLogon.set(rr);
+    }
+    public ResendRange getImplicitResendRequestFromLogon() {
+        return this.implicitResendRequestFromLogon.get();
+    }
+
     public void setLogoutReason(String reason) {
         synchronized (lock) {
             logoutReason = reason;
@@ -565,6 +583,19 @@ public final class SessionState {
 
         public boolean isChunkedResendRequest() {
             return getCurrentEndSeqNo() > 0;
+        }
+
+        public ResendRange() {
+        }
+
+        public ResendRange(int beginSeqNo, int endSeqNo) {
+            this(beginSeqNo, endSeqNo, endSeqNo);
+        }
+
+        public ResendRange(int beginSeqNo, int endSeqNo, int currentEndSeqNo) {
+            this.beginSeqNo = beginSeqNo;
+            this.endSeqNo = endSeqNo;
+            this.currentEndSeqNo = currentEndSeqNo;
         }
     }
 }
