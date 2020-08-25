@@ -223,7 +223,9 @@ public abstract class AbstractSocketAcceptor extends SessionConnector implements
             log.info("Skipping session creation as already created");
             return;
         }
-        HashMap<SessionID, Session> allSessions = new HashMap<>();
+        Map<SessionID, Session> allSessions = new HashMap<>();
+        boolean continueInitOnError = isContinueInitOnError();
+
         for (Iterator<SessionID> i = settings.sectionIterator(); i.hasNext();) {
             SessionID sessionID = i.next();
             String connectionType = settings.getString(sessionID,
@@ -235,11 +237,20 @@ public abstract class AbstractSocketAcceptor extends SessionConnector implements
             }
 
             if (connectionType.equals(SessionFactory.ACCEPTOR_CONNECTION_TYPE)) {
-                AcceptorSocketDescriptor descriptor = getAcceptorSocketDescriptor(settings, sessionID);
-                if (!isTemplate) {
-                    Session session = sessionFactory.create(sessionID, settings);
-                    descriptor.acceptSession(session);
-                    allSessions.put(sessionID, session);
+                try {
+                    AcceptorSocketDescriptor descriptor = getAcceptorSocketDescriptor(settings, sessionID);
+                    if (!isTemplate) {
+                        Session session = sessionFactory.create(sessionID, settings);
+                        descriptor.acceptSession(session);
+                        allSessions.put(sessionID, session);
+                    }
+                } catch (Throwable t) {
+                    if (continueInitOnError) {
+                        log.error("error during session initialization, continuing...", t);
+                    } else {
+                        throw t instanceof ConfigError ? (ConfigError) t : new ConfigError(
+                                "error during session initialization", t);
+                    }
                 }
             }
         }

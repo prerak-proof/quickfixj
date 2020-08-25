@@ -48,6 +48,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import javax.xml.XMLConstants;
 
 import static quickfix.FileUtil.Location.CLASSLOADER_RESOURCE;
 import static quickfix.FileUtil.Location.CONTEXT_RESOURCE;
@@ -170,6 +171,17 @@ public class DataDictionary {
      */
     public String getValueName(int field, String value) {
         return valueNames.get(field, value);
+    }
+
+    /**
+     * Get the value, if any, for an enumerated value name.
+     *
+     * @param field the tag
+     * @param name the value name
+     * @return the value assigned to passed name
+     */
+    public String getValue(int field, String name) {
+        return valueNames.getValue(field, name);
     }
 
     /**
@@ -868,6 +880,8 @@ public class DataDictionary {
 
     private void load(InputStream inputStream) throws ConfigError {
         final DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
+        factory.setAttribute(XMLConstants.ACCESS_EXTERNAL_DTD, "");
+        factory.setAttribute(XMLConstants.ACCESS_EXTERNAL_SCHEMA, "");
         Document document;
         try {
             final DocumentBuilder builder = factory.newDocumentBuilder();
@@ -1253,6 +1267,18 @@ public class DataDictionary {
         public V get(int field, String group) {
             Map<String, V> map = get(field);
             return map == null ? null : map.get(group);
+        }
+
+        public String getValue(int field, String name) {
+            Map<String, V> map = get(field);
+            if (map != null) {
+                for (Entry<String, V> entry : map.entrySet()) {
+                    if (entry.getValue().equals(name)) {
+                        return entry.getKey();
+                    }
+                }
+            }
+            return null;
         }
 
         public void put(int field, String group, V value) {

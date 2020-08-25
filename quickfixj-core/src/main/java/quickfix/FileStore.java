@@ -435,7 +435,7 @@ public class FileStore implements MessageStore, Closeable {
 
     /*
      * (non-Javadoc)
-     * @see quickfix.RefreshableMessageStore#refresh()
+     * @see quickfix.MessageStore#refresh()
      */
     @Override
     public void refresh() throws IOException {

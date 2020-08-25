@@ -114,9 +114,14 @@ public class Session implements Closeable {
     public static final String SETTING_MAX_LATENCY = "MaxLatency";
 
     /**
-     * Session setting for the test delay multiplier (0-1, as fraction of Heartbeat interval)
+     * Session setting for the test delay multiplier (as fraction of heartbeat interval).
      */
     public static final String SETTING_TEST_REQUEST_DELAY_MULTIPLIER = "TestRequestDelayMultiplier";
+
+    /**
+     * Session setting for the heartbeat timeout multiplier (as fraction of heartbeat interval).
+     */
+    public static final String SETTING_HEARTBEAT_TIMEOUT_MULTIPLIER = "HeartBeatTimeoutMultiplier";
 
     /**
      * Session scheduling setting to specify that session never reset
@@ -226,6 +231,12 @@ public class Session implements Closeable {
     public static final String SETTING_LOGOUT_TIMEOUT = "LogoutTimeout";
 
     /**
+     * Session setting for custom logon tags. Single entry or consecutive list of
+     * tag=value pairs, e.g. LogonTag=553=user and LogonTag1=554=password.
+     */
+    public static final String SETTING_LOGON_TAG = "LogonTag";
+
+    /**
      * Session setting for doing an automatic sequence number reset on logout.
      * Valid values are "Y" or "N". Default is "N".
      */
@@ -284,7 +295,7 @@ public class Session implements Closeable {
 
     /**
      * Requests that state and message data be refreshed from the message store at
-     * logon, if possible. This supports simple failover behavior for acceptors
+     * logon, if possible. This supports simple failover behavior for acceptors.
      */
     public static final String SETTING_REFRESH_ON_LOGON = "RefreshOnLogon";
 
@@ -373,7 +384,11 @@ public class Session implements Closeable {
     // @GuardedBy(this)
     private final SessionState state;
 
-    private boolean enabled;
+    /*
+     * Controls whether it is possible to log on to this Session (if Acceptor)
+     * or if Logon is sent out respectively (if Initiator).
+     */
+    private volatile boolean enabled;
 
     private final Object responderLock = new Object(); // unique instance
     // @GuardedBy(responderLock)
@@ -395,7 +410,7 @@ public class Session implements Closeable {
     private final boolean resetOnError;
     private final boolean disconnectOnError;
     private final UtcTimestampPrecision timestampPrecision;
-    private final boolean refreshMessageStoreAtLogon;
+    private final boolean refreshOnLogon;
     private final boolean redundantResentRequestsAllowed;
     private final boolean persistMessages;
     private final boolean checkCompID;
@@ -421,14 +436,15 @@ public class Session implements Closeable {
 
     private final AtomicReference<ApplVerID> targetDefaultApplVerID = new AtomicReference<>();
     private final DefaultApplVerID senderDefaultApplVerID;
-    private boolean validateSequenceNumbers = true;
-    private boolean validateIncomingMessage = true;
+    private final boolean validateSequenceNumbers;
+    private final boolean validateIncomingMessage;
     private final int[] logonIntervals;
     private final Set<InetAddress> allowedRemoteAddresses;
     
     public static final int DEFAULT_MAX_LATENCY = 120;
     public static final int DEFAULT_RESEND_RANGE_CHUNK_SIZE = 0; // no resend range
     public static final double DEFAULT_TEST_REQUEST_DELAY_MULTIPLIER = 0.5;
+    public static final double DEFAULT_HEARTBEAT_TIMEOUT_MULTIPLIER = 1.4;
     private static final String ENCOUNTERED_END_OF_STREAM = "Encountered END_OF_STREAM";
 
 
@@ -438,17 +454,18 @@ public class Session implements Closeable {
     private static final String BAD_ORIG_TIME_TEXT = new FieldException(BAD_TIME_REJ_REASON, OrigSendingTime.FIELD).getMessage();
     private static final String BAD_TIME_TEXT = new FieldException(BAD_TIME_REJ_REASON, SendingTime.FIELD).getMessage();
 
+    private final List<StringField> logonTags;
+
     protected static final Logger LOG = LoggerFactory.getLogger(Session.class);
 
-
     Session(Application application, MessageStoreFactory messageStoreFactory, SessionID sessionID,
-            DataDictionaryProvider dataDictionaryProvider, SessionSchedule sessionSchedule,
-            LogFactory logFactory, MessageFactory messageFactory, int heartbeatInterval) {
-        this(application, messageStoreFactory, sessionID, dataDictionaryProvider, sessionSchedule,
-                logFactory, messageFactory, heartbeatInterval, true, DEFAULT_MAX_LATENCY, UtcTimestampPrecision.MILLIS,
-                false, false, false, false, true, false, true, false,
-                DEFAULT_TEST_REQUEST_DELAY_MULTIPLIER, null, true, new int[] { 5 }, false, false,
-                false, false, true, false, true, false, null, true, DEFAULT_RESEND_RANGE_CHUNK_SIZE, false, false, false);
+            DataDictionaryProvider dataDictionaryProvider, SessionSchedule sessionSchedule, LogFactory logFactory,
+            MessageFactory messageFactory, int heartbeatInterval) {
+        this(application, messageStoreFactory, sessionID, dataDictionaryProvider, sessionSchedule, logFactory,
+             messageFactory, heartbeatInterval, true, DEFAULT_MAX_LATENCY, UtcTimestampPrecision.MILLIS, false, false,
+             false, false, true, false, true, false, DEFAULT_TEST_REQUEST_DELAY_MULTIPLIER, null, true, new int[] {5},
+             false, false, false, false, true, false, true, false, null, true, DEFAULT_RESEND_RANGE_CHUNK_SIZE, false,
+             false, false, new ArrayList<StringField>(), DEFAULT_HEARTBEAT_TIMEOUT_MULTIPLIER);
     }
 
     Session(Application application, MessageStoreFactory messageStoreFactory, SessionID sessionID,
@@ -456,7 +473,7 @@ public class Session implements Closeable {
             LogFactory logFactory, MessageFactory messageFactory, int heartbeatInterval,
             boolean checkLatency, int maxLatency, UtcTimestampPrecision timestampPrecision,
             boolean resetOnLogon, boolean resetOnLogout, boolean resetOnDisconnect,
-            boolean refreshMessageStoreAtLogon, boolean checkCompID,
+            boolean refreshOnLogon, boolean checkCompID,
             boolean redundantResentRequestsAllowed, boolean persistMessages,
             boolean useClosedRangeForResend, double testRequestDelayMultiplier,
             DefaultApplVerID senderDefaultApplVerID, boolean validateSequenceNumbers,
@@ -466,7 +483,7 @@ public class Session implements Closeable {
             boolean forceResendWhenCorruptedStore, Set<InetAddress> allowedRemoteAddresses,
             boolean validateIncomingMessage, int resendRequestChunkSize,
             boolean enableNextExpectedMsgSeqNum, boolean enableLastMsgSeqNumProcessed,
-            boolean validateChecksum) {
+            boolean validateChecksum, List<StringField> logonTags, double heartBeatTimeoutMultiplier) {
         this.application = application;
         this.sessionID = sessionID;
         this.sessionSchedule = sessionSchedule;
@@ -476,7 +493,7 @@ public class Session implements Closeable {
         this.resetOnLogout = resetOnLogout;
         this.resetOnDisconnect = resetOnDisconnect;
         this.timestampPrecision = timestampPrecision;
-        this.refreshMessageStoreAtLogon = refreshMessageStoreAtLogon;
+        this.refreshOnLogon = refreshOnLogon;
         this.dataDictionaryProvider = dataDictionaryProvider;
         this.messageFactory = messageFactory;
         this.checkCompID = checkCompID;
@@ -500,6 +517,7 @@ public class Session implements Closeable {
         this.enableNextExpectedMsgSeqNum = enableNextExpectedMsgSeqNum;
         this.enableLastMsgSeqNumProcessed = enableLastMsgSeqNumProcessed;
         this.validateChecksum = validateChecksum;
+        this.logonTags = logonTags;
 
         final Log engineLog = (logFactory != null) ? logFactory.create(sessionID) : null;
         if (engineLog instanceof SessionStateListener) {
@@ -512,7 +530,7 @@ public class Session implements Closeable {
         }
 
         state = new SessionState(this, engineLog, heartbeatInterval, heartbeatInterval != 0,
-                messageStore, testRequestDelayMultiplier);
+            messageStore, testRequestDelayMultiplier, heartBeatTimeoutMultiplier);
 
         registerSession(this);
 
@@ -734,7 +752,7 @@ public class Session implements Closeable {
         setEnabled(true);
     }
 
-    private synchronized void setEnabled(boolean enabled) {
+    private void setEnabled(boolean enabled) {
         this.enabled = enabled;
     }
 
@@ -791,7 +809,7 @@ public class Session implements Closeable {
      *
      * @return true if session is enabled, false otherwise.
      */
-    public synchronized boolean isEnabled() {
+    public boolean isEnabled() {
         return enabled;
     }
 
@@ -1232,10 +1250,6 @@ public class Session implements Closeable {
             return true;
         }
         return false;
-    }
-
-    private boolean isStateRefreshNeeded(String msgType) {
-        return refreshMessageStoreAtLogon && !state.isInitiator() && MsgType.LOGON.equals(msgType);
     }
 
     private void nextReject(Message reject) throws FieldNotFound, RejectLogon, IncorrectDataFormat,
@@ -2046,10 +2060,8 @@ public class Session implements Closeable {
         if (sessionID.isFIXT()) {
             logon.setField(DefaultApplVerID.FIELD, senderDefaultApplVerID);
         }
-        if (isStateRefreshNeeded(MsgType.LOGON)) {
-            getLog().onEvent("Refreshing message/state store at logon");
-            getStore().refresh();
-            stateListener.onRefresh();
+        if (refreshOnLogon) {
+            refreshState();
         }
         if (resetOnLogon) {
             resetState();
@@ -2066,6 +2078,8 @@ public class Session implements Closeable {
             logon.setInt(NextExpectedMsgSeqNum.FIELD, nextExpectedMsgNum);
             state.setLastExpectedLogonNextSeqNum(nextExpectedMsgNum);
         }
+
+        setLogonTags(logon);
         return sendAdmin(logon, 0, false);
     }
 
@@ -2152,10 +2166,8 @@ public class Session implements Closeable {
         // QFJ-926 - reset session before accepting Logon
         resetIfSessionNotCurrent(sessionID, SystemTime.currentTimeMillis());
 
-        if (isStateRefreshNeeded(MsgType.LOGON)) {
-            getLog().onEvent("Refreshing message/state store at logon");
-            getStore().refresh();
-            stateListener.onRefresh();
+        if (refreshOnLogon) {
+            refreshState();
         }
 
         if (logon.isSetField(ResetSeqNumFlag.FIELD)) {
@@ -2670,6 +2682,7 @@ public class Session implements Closeable {
             return false;
         }
         // continue sending the message; we don't use sendRaw return value as sendAdmin return value has meaning
+        setLogonTags(message);
         sendRaw(message, num);
         return true;
     }
@@ -2935,7 +2948,7 @@ public class Session implements Closeable {
     }
 
     public boolean getRefreshOnLogon() {
-        return refreshMessageStoreAtLogon;
+        return refreshOnLogon;
     }
 
     public boolean getResetOnDisconnect() {
@@ -3152,6 +3165,23 @@ public class Session implements Closeable {
 
     private String getMessageToLog(final Message message) {
         return (message.toRawString() != null ? message.toRawString() : message.toString());
+    }
+
+    private void setLogonTags(final Message logon) {
+        for (StringField field : logonTags) {
+            if (dataDictionaryProvider != null
+                    && dataDictionaryProvider.getSessionDataDictionary(sessionID.getBeginString()).isHeaderField(field.getTag())) {
+                logon.getHeader().setField(field);
+                continue;
+            }
+            logon.setField(field);
+        }
+    }
+
+    private void refreshState() throws IOException {
+        getLog().onEvent("Refreshing message/state store on Logon");
+        getStore().refresh();
+        stateListener.onRefresh();
     }
 
 }

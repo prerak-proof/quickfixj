@@ -192,11 +192,13 @@ public class IoSessionInitiator {
                     : SSLSupport.getDefaultCipherSuites(sslContext));
             sslFilter.setEnabledProtocols(sslConfig.getEnabledProtocols() != null ? sslConfig.getEnabledProtocols()
                     : SSLSupport.getSupportedProtocols(sslContext));
+            sslFilter.setUseSNI(sslConfig.isUseSNI());
             ioFilterChainBuilder.addLast(SSLSupport.FILTER_NAME, sslFilter);
             return sslFilter;
         }
 
-        public synchronized void run() {
+        @Override
+        public void run() {
             resetIoConnector();
             try {
                 if (connectFuture == null) {
