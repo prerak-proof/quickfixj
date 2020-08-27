@@ -1,12 +1,9 @@
-QuickFIX/J
+QF/J
 ==========
 
-[![Build Status](https://travis-ci.com/quickfix-j/quickfixj.svg?branch=master)](https://travis-ci.com/quickfix-j/quickfixj)
-[![Maven Central](https://maven-badges.herokuapp.com/maven-central/org.quickfixj/quickfixj-core/badge.svg)](https://maven-badges.herokuapp.com/maven-central/org.quickfixj/quickfixj-core)
-[![Total alerts](https://img.shields.io/lgtm/alerts/g/quickfix-j/quickfixj.svg?logo=lgtm&logoWidth=18)](https://lgtm.com/projects/g/quickfix-j/quickfixj/alerts/)
-[![Language grade: Java](https://img.shields.io/lgtm/grade/java/g/quickfix-j/quickfixj.svg?logo=lgtm&logoWidth=18)](https://lgtm.com/projects/g/quickfix-j/quickfixj/context:java)
+This is Proof Trading's modified fork of the QF/J project repository.
 
-This is the official QuickFIX/J project repository.
+Details: https://github.com/prerak-proof/quickfixj/wiki/Proof-Modifications-to-QuickFIX-J
 
 ## intro
 QuickFIX/J is a full featured messaging engine for the FIX protocol (FIX versions 4.0 - 5.0SP2/FIXT1.1).
@@ -41,6 +38,11 @@ Once a security issue is fixed in QuickFIX/J it will be communicated via the use
 Pull requests are always welcome! Best is if you added a unit test to show that a certain bug has been fixed or a new feature works as expected.
 
 ## build instructions
+
+Proof release: clone the repo and issue the following command.
+```
+$ mvn clean package -Dmaven.javadoc.skip=true -DskipTests -Pproof
+```
 
 Fastest: clone the repo and issue the following command.
 ```
