@@ -202,6 +202,10 @@ public abstract class AbstractSocketInitiator extends SessionConnector implement
     }
 
     private void createSessions() throws ConfigError, FieldConvertError {
+        if (!getSessions().isEmpty()) {
+            log.info("Skipping session creation as already created");
+            return;
+        }
         final SessionSettings settings = getSettings();
         boolean continueInitOnError = isContinueInitOnError();
 
