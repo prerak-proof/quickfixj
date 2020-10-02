@@ -43,10 +43,14 @@ Proof release: clone the repo and issue the following command.
 ```
 $ mvn clean package -Dmaven.javadoc.skip=true -DskipTests -Pproof
 ```
+Proof full test: clone the repo and issue the following command.
+```
+mvn clean package -Dmaven.javadoc.skip=true -Dmaven.source.skip=true
+```
 
 Fastest: clone the repo and issue the following command.
 ```
-$ mvn clean package -Dmaven.javadoc.skip=true -DskipTests -PskipBundlePlugin
+$ mvn clean package -Dmaven.javadoc.skip=true -Dmaven.source.skip=true -DskipTests -PskipBundlePlugin
 ```
 
 Slower: if you only want to skip the acceptance test suite:
