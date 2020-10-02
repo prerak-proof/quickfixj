@@ -230,7 +230,11 @@ public class FileStore implements MessageStore, Closeable {
     public void closeAndDeleteFiles() throws IOException {
         close();
         if (this.backupBeforeDelete) {
-            backupFiles(msgFileName, headerFileName, senderSeqNumFileName, targetSeqNumFileName, sessionFileName);
+            try {
+                backupFiles(msgFileName, headerFileName, senderSeqNumFileName, targetSeqNumFileName, sessionFileName);
+            } catch (Exception e) {
+                System.err.println("Error backing up files: " + e);
+            }
         }
         deleteFile(headerFileName);
         deleteFile(msgFileName);
